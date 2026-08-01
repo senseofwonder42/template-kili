@@ -1,0 +1,16 @@
+_commit: cbfd31b
+_src_path: gh:senseofwonder42/copier-datascience-template
+add_docker: false
+add_docs: true
+add_dvc: false
+add_pre_commit: true
+add_type_checking: false
+author_email: antoine.j.fleurentin@gmail.com
+author_name: afleuren
+description: Exemples d'utilisation du SDK Python Kili pour l'annotation de documents
+    d'assurance
+install_dependencies: false
+project_name: Kili Examples
+project_profile: lean
+project_slug: kili_examples
+python_version: '3.12'

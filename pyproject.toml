@@ -1,0 +1,91 @@
+[project]
+name = "kili_examples"
+version = "0.1.0"
+description = "Exemples d'utilisation du SDK Python Kili pour l'annotation de documents d'assurance"
+readme = "README.md"
+authors = [
+    { name = "afleuren", email = "antoine.j.fleurentin@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "kili>=2.176,<3",
+    "loguru>=0.7.3",
+    "pillow>=12.3.0",
+    "pydantic-settings>=2.12.0",
+    "pymupdf>=1.28.0",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "pytest-env>=1.2.0",
+    "ruff>=0.14.10",
+]
+notebook = [
+    "ipykernel>=6.31.0",
+    "jupyter>=1.1.1",
+]
+docs = [
+    "ipykernel<7.0.0",
+    "mkdocs>=1.6.1",
+    "mkdocs-gen-files>=0.6.0",
+    "mkdocs-jupyter>=0.25.0",
+    "mkdocs-literate-nav>=0.6.2",
+    "mkdocs-material>=9.7.1",
+    "mkdocstrings[python]>=1.0.3",
+]
+
+[tool.uv]
+# Groups installed by a bare `uv sync`.
+default-groups = ["dev", "notebook"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+# command-name = "package.module:function"
+start-app = "kili_examples.main:main"
+
+[tool.ruff]
+line-length = 79
+indent-width = 4
+include = ["**.py", "*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "PTH", # flake8-use-pathlib
+    "ANN", # flake8-annotations
+    "ARG", # flake8-unused-arguments
+    "D101", # Missing docstring in public class
+    "D102", # Missing docstring in public method
+    "D103", # Missing docstring in public function
+    "D417", # Missing argument descriptions in the docstring
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Les noms de tests tiennent lieu de documentation ; les fixtures pytest
+# sont reçues en argument sans toujours être utilisées explicitement.
+"tests/**.py" = ["ANN", "ARG", "D"]
+# Exploratory code: no annotations, no docstrings, imports where you need them.
+"notebooks/**" = ["ANN", "ARG", "D", "E402", "E501", "F401"]
+# Les `predict(asset)` factices gardent la signature qu'aura le vrai
+# modèle, même quand la version bouchonnée n'exploite pas l'asset.
+"examples/**.py" = ["ARG001"]
+
+[tool.pytest.ini_options]
+addopts = "-v"
+testpaths = ["tests"]
+env = [
+    "ENVIRONMENT=test",
+    "LOG_LEVEL=INFO",
+]
