@@ -1,4 +1,4 @@
-"""Options de ligne de commande communes aux neuf exemples.
+"""Options de ligne de commande communes aux dix exemples.
 
 Chaque exemple expose le même cycle en quatre étapes :
 
@@ -12,10 +12,21 @@ Sans aucun de ces drapeaux, les quatre étapes s'enchaînent.
 `--project-id` permet de rejouer une étape sur un projet existant plutôt
 que d'en créer un nouveau à chaque exécution : c'est ce qui rend les
 scripts ré-exécutables sans polluer l'instance de projets jetables.
+
+L'exemple 10 ajoute deux options qui lui sont propres (`--scope` et
+`--sample-size`) via `with_scope=True` : elles ne concernent que la
+revue d'un jeu d'évaluation RAG, pas les neuf autres exemples.
 """
 
 import argparse
 from dataclasses import dataclass
+
+# Périmètres de revue proposés par `--scope`.
+# - rejected : uniquement les cas rejetés par le LLM-as-judge
+# - all      : toutes les questions, pour auditer aussi ses validations
+# - sample   : les rejets, plus un échantillon de cas validés
+SCOPE_CHOICES = ("rejected", "all", "sample")
+DEFAULT_SAMPLE_SIZE = 10
 
 
 @dataclass(frozen=True)
@@ -29,11 +40,23 @@ class Steps:
     project_id: str | None
 
 
-def build_parser(description: str) -> argparse.ArgumentParser:
+@dataclass(frozen=True)
+class ReviewScope:
+    """Périmètre de revue d'un jeu d'évaluation (exemple 10)."""
+
+    scope: str
+    sample_size: int
+
+
+def build_parser(
+    description: str, *, with_scope: bool = False
+) -> argparse.ArgumentParser:
     """Construire le parseur d'arguments commun aux exemples.
 
     Args:
         description: Description de l'exemple, affichée par `--help`.
+        with_scope: True pour ajouter `--scope` et `--sample-size`,
+            propres à la revue d'un jeu d'évaluation.
 
     Returns:
         Le parseur configuré.
@@ -61,7 +84,47 @@ def build_parser(description: str) -> argparse.ArgumentParser:
             "Obligatoire si --create n'est pas demandé."
         ),
     )
+    if with_scope:
+        parser.add_argument(
+            "--scope",
+            choices=SCOPE_CHOICES,
+            default="rejected",
+            help=(
+                "Questions à faire relire : les cas rejetés par le juge "
+                "(rejected, défaut), toutes les questions (all), ou les "
+                "rejets plus un échantillon de cas validés (sample)."
+            ),
+        )
+        parser.add_argument(
+            "--sample-size",
+            type=int,
+            default=DEFAULT_SAMPLE_SIZE,
+            help=(
+                "Nombre de cas validés à échantillonner. "
+                "Utilisé uniquement avec --scope sample."
+            ),
+        )
     return parser
+
+
+def parse_review_scope(parser: argparse.ArgumentParser) -> ReviewScope:
+    """Lire le périmètre de revue demandé.
+
+    À appeler sur un parseur construit avec `with_scope=True`.
+
+    Args:
+        parser: Parseur construit par `build_parser(with_scope=True)`.
+
+    Returns:
+        Le périmètre demandé.
+
+    Raises:
+        SystemExit: Si `--sample-size` est négatif.
+    """
+    args = parser.parse_args()
+    if args.sample_size < 0:
+        parser.error("--sample-size doit être positif ou nul.")
+    return ReviewScope(scope=args.scope, sample_size=args.sample_size)
 
 
 def parse_steps(parser: argparse.ArgumentParser) -> Steps:

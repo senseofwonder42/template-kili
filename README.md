@@ -133,15 +133,16 @@ permet de rejouer une étape sans recréer de projet.
 | Extraire les champs d'une facture de réparation | `TRANSCRIPTION` (un job par champ) | [`07_vlm_text_extraction.py`](./examples/07_vlm_text_extraction.py) |
 | Repérer contrat, montant, date dans un email | `NAMED_ENTITIES_RECOGNITION` | [`08_ner_text.py`](./examples/08_ner_text.py) |
 | Traiter un PDF de sinistre en une seule passe | interface multi-jobs + job conditionnel | [`09_custom_multitask_pdf.py`](./examples/09_custom_multitask_pdf.py) |
-| Arbitrer les rejets d'un LLM-as-judge (RAG) | `LLM_STATIC` (conversations, `level`) | [`10_llm_judge_ab_testing.py`](./examples/10_llm_judge_ab_testing.py) |
+| Réviser un jeu d'évaluation RAG (LLM-as-judge) | `LLM_STATIC` (conversations, `level`) | [`10_llm_judge_ab_testing.py`](./examples/10_llm_judge_ab_testing.py) |
 
 L'exemple **09** est celui à lire pour comprendre qu'une interface Kili
 n'est qu'un arbre JSON de jobs, combinables librement.
 
 L'exemple **10** est à part : il n'annote pas des documents mais des
-**conversations** (`LLM_STATIC`), pour faire arbitrer par les métiers
-les cas rejetés à tort par un LLM-as-judge. Sa sortie est une banque de
-réponses enrichie, réinjectée dans le run suivant du juge — voir
+**conversations** (`LLM_STATIC`). Le métier y juge indépendamment la
+réponse de référence et la prédiction du RAG, et peut réécrire l'une ou
+l'autre. Sa sortie est la **version suivante du jeu d'évaluation**,
+réinjectée dans le run suivant du juge — voir
 [Évaluation LLM](llm-static.md).
 
 ## Organisation du dépôt

@@ -1,10 +1,21 @@
-"""Boucle d'amélioration du LLM-as-judge (exemple 10).
+"""Révision métier d'un jeu d'évaluation RAG (exemple 10).
 
 Le cas d'usage : un LLM-as-judge compare la prédiction d'un RAG à une
-réponse validée par les métiers. Trop sévère, il rejette des prédictions
-en réalité acceptables. Les métiers arbitrent ces rejets dans Kili ; les
-prédictions qu'ils valident deviennent des `secondary_answers`, et le
-juge reçoit ensuite **toutes** les réponses valides.
+réponse validée par les métiers. Son verdict sert à **sélectionner** les
+cas à faire relire — mais il n'est jamais montré à l'annotateur, qui
+juge à l'aveugle. Le métier répond à deux questions indépendantes :
+
+1. la réponse de référence est-elle correcte ? (elle est présumée bonne,
+   mais l'annotation d'origine peut être fautive) ;
+2. la nouvelle réponse prédite est-elle correcte ?
+
+Deux champs libres optionnels permettent de corriger la référence et
+d'ajouter une formulation valide supplémentaire.
+
+La sortie est une **nouvelle version du dataset** : une banque de
+réponses au schéma inchangé, directement consommable par le run de juge
+suivant. La traçabilité (ce qui a changé, où le juge s'est trompé) part
+dans un rapport séparé pour ne pas polluer les données.
 
 Ce module contient la logique pure de cette boucle — sans appel Kili —
 pour qu'elle soit testable et réutilisable hors du script d'exemple.
@@ -12,22 +23,40 @@ pour qu'elle soit testable et réutilisable hors du script d'exemple.
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from loguru import logger
 
-# Catégorie du job VERDICT_METIER qui déclenche la promotion en
-# réponse secondaire.
-ACCEPTABLE_CATEGORY = "ACCEPTABLE"
-VERDICT_JOB_NAME = "VERDICT_METIER"
+# --- Noms des jobs de l'interface d'arbitrage -----------------------------
+# Ils sont partagés entre le script d'exemple (qui construit l'ontologie)
+# et ce module (qui relit les labels), d'où leur centralisation ici.
+
+REFERENCE_CORRECT_JOB = "REFERENCE_CORRECTE"
+PREDICTION_CORRECT_JOB = "PREDICTION_CORRECTE"
+REFERENCE_FIX_JOB = "REFERENCE_CORRIGEE"
+SECONDARY_ANSWER_JOB = "REPONSE_SECONDAIRE"
+
+# Les deux jugements sont des radios binaires.
+YES = "OUI"
+NO = "NON"
+
+# Périmètres de revue possibles.
+Scope = Literal["rejected", "all", "sample"]
+
+# Verdict du juge marquant un rejet.
+REJECTED_VERDICT = "NON_CONFORME"
 
 
-def extract_business_verdict(
+# --- Lecture des labels exportés ------------------------------------------
+
+
+def extract_category(
     conversation: dict[str, Any],
+    job_name: str,
     *,
-    job_name: str = VERDICT_JOB_NAME,
+    round_index: str = "0",
 ) -> str | None:
-    """Lire le verdict métier d'une conversation exportée.
+    """Lire la catégorie choisie sur un job de classification.
 
     Le format de label LLM_STATIC est indexé par niveau puis, au niveau
     `round`, par numéro de tour (une chaîne). On ne lit que le tour
@@ -41,17 +70,14 @@ def extract_business_verdict(
     Args:
         conversation: Une conversation telle que renvoyée par
             `kili.llm.export(...)`.
-        job_name: Nom du job portant le verdict.
+        job_name: Nom du job de classification à lire.
+        round_index: Numéro du tour, sous forme de chaîne.
 
     Returns:
-        Le nom de la catégorie choisie, ou `None` si le cas n'a pas été
-        arbitré.
+        Le nom de la catégorie choisie, ou `None` si le job n'a pas été
+        renseigné.
     """
-    label = conversation.get("label") or {}
-    round_level = label.get("round") or {}
-    job_answer = round_level.get(job_name) or {}
-
-    first_round = job_answer.get("0") or {}
+    first_round = _round_answer(conversation, job_name, round_index)
     categories = first_round.get("categories") or []
     if not categories:
         return None
@@ -63,6 +89,44 @@ def extract_business_verdict(
     if isinstance(first, dict):
         return first.get("name")
     return str(first)
+
+
+def extract_text(
+    conversation: dict[str, Any],
+    job_name: str,
+    *,
+    round_index: str = "0",
+) -> str | None:
+    """Lire la saisie d'un job de transcription.
+
+    Une saisie vide ou composée uniquement d'espaces est traitée comme
+    absente : c'est ce que produit un annotateur qui ouvre le champ sans
+    le remplir.
+
+    Args:
+        conversation: Une conversation exportée.
+        job_name: Nom du job de transcription à lire.
+        round_index: Numéro du tour, sous forme de chaîne.
+
+    Returns:
+        Le texte saisi, nettoyé de ses espaces de bord, ou `None`.
+    """
+    first_round = _round_answer(conversation, job_name, round_index)
+    text = first_round.get("text")
+    if not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    return stripped or None
+
+
+def _round_answer(
+    conversation: dict[str, Any], job_name: str, round_index: str
+) -> dict[str, Any]:
+    """Isoler la réponse d'un job au niveau `round`, ou un dict vide."""
+    label = conversation.get("label") or {}
+    round_level = label.get("round") or {}
+    job_answer = round_level.get(job_name) or {}
+    return job_answer.get(round_index) or {}
 
 
 def _question_id_of(conversation: dict[str, Any]) -> str | None:
@@ -91,29 +155,61 @@ def _prediction_of(conversation: dict[str, Any]) -> str | None:
     return assistant_items[-1].get("content")
 
 
+def is_reviewed(conversation: dict[str, Any]) -> bool:
+    """Dire si une conversation porte un arbitrage exploitable.
+
+    Le seul champ qui compte est `PREDICTION_CORRECTE` : il n'est jamais
+    pré-rempli, donc sa présence prouve qu'un humain est passé.
+    `REFERENCE_CORRECTE`, lui, arrive pré-coché à `OUI` et ne prouve
+    rien.
+
+    Args:
+        conversation: Une conversation exportée.
+
+    Returns:
+        True si le cas a été arbitré.
+    """
+    return extract_category(conversation, PREDICTION_CORRECT_JOB) is not None
+
+
+# --- Construction de la nouvelle version du dataset -----------------------
+
+
 def build_enriched_answer_bank(
     *,
     answer_bank: list[dict[str, Any]],
     conversations: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Ajouter à la banque les prédictions validées par le métier.
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Produire la banque révisée et son rapport de révision.
 
-    Pour chaque conversation arbitrée `ACCEPTABLE`, la prédiction est
-    ajoutée aux `secondary_answers` de sa question. L'opération est
-    **idempotente** : réexporter deux fois n'ajoute pas deux fois la
-    même variante, ce qui compte puisque la boucle tourne à chaque run.
+    Trois choses peuvent arriver à un enregistrement :
 
-    La banque d'entrée n'est pas modifiée sur place.
+    - sa réponse de référence est **remplacée**, si le métier l'a jugée
+      fautive et en a saisi une version corrigée ;
+    - une **réponse secondaire** lui est ajoutée : soit la réécriture
+      saisie par le métier, soit — à défaut — la prédiction elle-même
+      lorsqu'elle a été jugée correcte ;
+    - rien ne bouge.
+
+    L'opération est **idempotente** : réexporter deux fois n'ajoute pas
+    deux fois la même variante, ce qui compte puisque la boucle tourne à
+    chaque run. La banque d'entrée n'est pas modifiée sur place.
+
+    Le schéma de sortie est identique au schéma d'entrée
+    (`question_id`, `question`, `answer`, `secondary_answers`) : c'est ce
+    qui rend le fichier directement consommable par le juge, sans
+    adaptation. Toute la traçabilité part dans le rapport.
 
     Args:
         answer_bank: La banque de réponses actuelle, un enregistrement
-            par question (`question_id`, `question`, `answer`,
-            `secondary_answers`).
-        conversations: Les conversations exportées de Kili.
+            par question.
+        conversations: Les conversations exportées de Kili. Les
+            questions absentes (hors périmètre de revue) sont reportées
+            inchangées.
 
     Returns:
-        Un couple `(banque enrichie, identifiants des questions
-        effectivement enrichies)`.
+        Un couple `(banque révisée, rapport de révision)`. Le rapport
+        est détaillé dans `build_revision_report`.
     """
     enriched = [
         {
@@ -124,9 +220,14 @@ def build_enriched_answer_bank(
     ]
     by_question_id = {item["question_id"]: item for item in enriched}
 
-    promoted: list[str] = []
+    corrected_references: list[dict[str, str]] = []
+    promoted_predictions: list[str] = []
+    manual_rewrites: list[str] = []
+    missing_corrections: list[str] = []
+    agreement: list[dict[str, Any]] = []
+
     for conversation in conversations:
-        if extract_business_verdict(conversation) != ACCEPTABLE_CATEGORY:
+        if not is_reviewed(conversation):
             continue
 
         question_id = _question_id_of(conversation)
@@ -138,22 +239,215 @@ def build_enriched_answer_bank(
             )
             continue
 
-        prediction = _prediction_of(conversation)
-        if not prediction:
-            logger.warning("Aucune prédiction lisible pour {}", question_id)
-            continue
+        prediction_ok = (
+            extract_category(conversation, PREDICTION_CORRECT_JOB) == YES
+        )
+        agreement.append(
+            {
+                "question_id": question_id,
+                "judge_verdict": (conversation.get("metadata") or {}).get(
+                    "judge_verdict"
+                ),
+                "prediction_correcte": prediction_ok,
+            }
+        )
 
-        # Idempotence : ni doublon d'une variante, ni variante
-        # identique à la réponse principale.
-        if prediction in entry["secondary_answers"] or prediction == entry.get(
-            "answer"
-        ):
-            continue
+        _apply_reference_fix(
+            conversation=conversation,
+            entry=entry,
+            question_id=question_id,
+            corrected_references=corrected_references,
+            missing_corrections=missing_corrections,
+        )
+        _apply_secondary_answer(
+            conversation=conversation,
+            entry=entry,
+            question_id=question_id,
+            prediction_ok=prediction_ok,
+            promoted_predictions=promoted_predictions,
+            manual_rewrites=manual_rewrites,
+        )
 
-        entry["secondary_answers"].append(prediction)
-        promoted.append(question_id)
+    report = build_revision_report(
+        corrected_references=corrected_references,
+        promoted_predictions=promoted_predictions,
+        manual_rewrites=manual_rewrites,
+        missing_corrections=missing_corrections,
+        agreement=agreement,
+    )
+    return enriched, report
 
-    return enriched, promoted
+
+def _apply_reference_fix(
+    *,
+    conversation: dict[str, Any],
+    entry: dict[str, Any],
+    question_id: str,
+    corrected_references: list[dict[str, str]],
+    missing_corrections: list[str],
+) -> None:
+    """Remplacer la réponse de référence si le métier l'a corrigée.
+
+    Une référence déclarée fautive **sans** texte de remplacement n'est
+    pas écrasée : on préfère garder une réponse imparfaite qu'aucune.
+    Le cas est signalé dans le rapport, à traiter à la main.
+    """
+    if extract_category(conversation, REFERENCE_CORRECT_JOB) != NO:
+        return
+
+    fixed = extract_text(conversation, REFERENCE_FIX_JOB)
+    if fixed is None:
+        logger.warning(
+            "Référence déclarée fautive sans correction saisie : {}",
+            question_id,
+        )
+        missing_corrections.append(question_id)
+        return
+
+    if fixed == entry["answer"]:
+        return
+
+    corrected_references.append(
+        {
+            "question_id": question_id,
+            "ancienne_reponse": entry["answer"],
+            "nouvelle_reponse": fixed,
+        }
+    )
+    entry["answer"] = fixed
+    # La correction peut rendre une variante existante redondante.
+    entry["secondary_answers"] = [
+        variant for variant in entry["secondary_answers"] if variant != fixed
+    ]
+
+
+def _apply_secondary_answer(
+    *,
+    conversation: dict[str, Any],
+    entry: dict[str, Any],
+    question_id: str,
+    prediction_ok: bool,
+    promoted_predictions: list[str],
+    manual_rewrites: list[str],
+) -> None:
+    """Ajouter une réponse secondaire si l'arbitrage en produit une.
+
+    Deux sources possibles, dans cet ordre de priorité :
+
+    1. la réécriture saisie par le métier — elle prime toujours, y
+       compris quand la prédiction a été jugée incorrecte (c'est
+       précisément le cas « presque bonne, je l'ai corrigée ») ;
+    2. à défaut, la prédiction elle-même, si elle a été jugée correcte.
+
+    Aucune réponse secondaire n'est obligatoire : un cas peut être
+    arbitré sans qu'aucune variante n'en sorte.
+    """
+    rewrite = extract_text(conversation, SECONDARY_ANSWER_JOB)
+    if rewrite is not None:
+        if _add_variant(entry, rewrite):
+            manual_rewrites.append(question_id)
+        return
+
+    if not prediction_ok:
+        return
+
+    prediction = _prediction_of(conversation)
+    if not prediction:
+        logger.warning("Aucune prédiction lisible pour {}", question_id)
+        return
+
+    if _add_variant(entry, prediction):
+        promoted_predictions.append(question_id)
+
+
+def _add_variant(entry: dict[str, Any], variant: str) -> bool:
+    """Ajouter une variante en garantissant l'unicité.
+
+    Returns:
+        True si la variante a bien été ajoutée, False si elle était déjà
+        connue (doublon ou identique à la réponse principale).
+    """
+    if not variant or variant == entry["answer"]:
+        return False
+    if variant in entry["secondary_answers"]:
+        return False
+    entry["secondary_answers"].append(variant)
+    return True
+
+
+def build_revision_report(
+    *,
+    corrected_references: list[dict[str, str]],
+    promoted_predictions: list[str],
+    manual_rewrites: list[str],
+    missing_corrections: list[str],
+    agreement: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assembler le rapport de révision.
+
+    Le rapport vit à côté du dataset, jamais dedans : il porte tout ce
+    qui sert à comprendre le run sans alourdir le fichier que le juge
+    doit relire.
+
+    Le croisement juge × métier n'est complet qu'en périmètre `all` ou
+    `sample` : en périmètre `rejected`, le juge n'a proposé que des
+    rejets, donc ses faux positifs sont hors champ par construction.
+
+    Args:
+        corrected_references: Références remplacées, avec ancienne et
+            nouvelle valeur.
+        promoted_predictions: Questions dont la prédiction a été promue
+            telle quelle.
+        manual_rewrites: Questions enrichies d'une réécriture manuelle.
+        missing_corrections: Références déclarées fautives sans texte de
+            remplacement.
+        agreement: Un enregistrement par cas arbitré, portant le verdict
+            du juge et celui du métier.
+
+    Returns:
+        Le rapport, sérialisable en JSON.
+    """
+    judge_rejected_and_metier_agrees = 0
+    judge_rejected_but_metier_accepts = 0
+    judge_accepted_and_metier_agrees = 0
+    judge_accepted_but_metier_rejects = 0
+
+    for item in agreement:
+        rejected = item["judge_verdict"] == REJECTED_VERDICT
+        correct = item["prediction_correcte"]
+        if rejected and not correct:
+            judge_rejected_and_metier_agrees += 1
+        elif rejected and correct:
+            judge_rejected_but_metier_accepts += 1
+        elif not rejected and correct:
+            judge_accepted_and_metier_agrees += 1
+        else:
+            judge_accepted_but_metier_rejects += 1
+
+    reviewed = len(agreement)
+    disagreements = (
+        judge_rejected_but_metier_accepts + judge_accepted_but_metier_rejects
+    )
+
+    return {
+        "references_corrigees": corrected_references,
+        "predictions_promues": promoted_predictions,
+        "reecritures_manuelles": manual_rewrites,
+        "references_fautives_sans_correction": missing_corrections,
+        "desaccord_juge_metier": {
+            "cas_arbitres": reviewed,
+            "accords": reviewed - disagreements,
+            "desaccords": disagreements,
+            # Faux négatif du juge : il a rejeté ce que le métier
+            # accepte. C'est le motif d'origine de toute la boucle.
+            "faux_negatifs_juge": judge_rejected_but_metier_accepts,
+            # Faux positif du juge : il a validé ce que le métier
+            # rejette. Invisible en périmètre `rejected`.
+            "faux_positifs_juge": judge_accepted_but_metier_rejects,
+            "juge_rejette_metier_confirme": judge_rejected_and_metier_agrees,
+            "juge_accepte_metier_confirme": judge_accepted_and_metier_agrees,
+        },
+    }
 
 
 def write_answer_bank(path: Path, answer_bank: list[dict[str, Any]]) -> None:

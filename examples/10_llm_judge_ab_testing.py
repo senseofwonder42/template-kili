@@ -1,17 +1,35 @@
-"""Exemple 10 — Arbitrage métier d'un LLM-as-judge (RAG assurance auto).
+"""Exemple 10 — Révision métier d'un jeu d'évaluation RAG (assurance auto).
 
 Besoin métier
     On évalue un RAG métier en comparant sa prédiction à une réponse
     validée par les experts. Un LLM-as-judge classe automatiquement
     chaque prédiction en conforme / non conforme, mais il est trop
     sévère : il ignore ce qui, dans la réponse de référence, est
-    *essentiel* et ce qui n'est qu'*optionnel*. Les cas qu'il rejette
-    doivent donc repasser devant les métiers.
+    *essentiel* et ce qui n'est qu'*optionnel*.
 
-    Quand le métier estime finalement une prédiction acceptable, on
-    l'ajoute comme `secondary_answer` : une seconde formulation valide.
-    Aux runs suivants, le juge reçoit **toutes** les réponses valides,
-    ce qui réduit mécaniquement ses faux négatifs.
+    À chaque nouveau benchmark, on fait relire une sélection de cas par
+    le métier pour produire **la version suivante du dataset**. Le
+    métier répond à deux questions indépendantes :
+
+    1. la réponse de référence est-elle correcte ? Elle est présumée
+       bonne — d'où le pré-remplissage à OUI — mais l'annotation
+       d'origine est parfois fautive et doit pouvoir être corrigée ;
+    2. la nouvelle réponse prédite est-elle correcte ?
+
+    Deux champs libres, tous deux optionnels, complètent le tableau :
+    l'un pour réécrire une référence fautive, l'autre pour saisir une
+    seconde formulation valide. Ce dernier couvre le cas courant où la
+    prédiction est *presque* bonne — il lui manque une information, ou
+    elle en ajoute une fausse : plutôt que de la rejeter en bloc, le
+    métier en écrit la version correcte, qui rejoint les
+    `secondary_answers`.
+
+Un choix de conception : le juge ne s'affiche pas
+    Le verdict du juge sert uniquement à **sélectionner** les cas
+    (voir `--scope`). Il n'apparaît jamais à l'écran : l'afficher ferait
+    perdre du temps aux annotateurs et les ancrerait sur l'avis qu'on
+    cherche précisément à auditer. Il reste dans les `metadata`, d'où
+    l'export tire les statistiques de désaccord juge / métier.
 
 Ce que cet exemple montre
     - un projet `input_type="LLM_STATIC"`, conçu pour comparer des
@@ -23,10 +41,10 @@ Ce que cet exemple montre
       ASSISTANT** d'un même tour, donc côte à côte dans l'éditeur ;
     - des jobs portant un `level` (`round`, `completion`) : une clé
       propre aux projets LLM ;
-    - le pré-remplissage du verdict du juge, pour que le métier
-      *arbitre* au lieu de repartir de zéro ;
-    - un export qui referme la boucle en écrivant la banque de réponses
-      enrichie.
+    - un périmètre de revue paramétrable, pour arbitrer entre coût
+      d'annotation et complétude de l'audit ;
+    - un export qui referme la boucle en écrivant la version suivante
+      du dataset, plus un rapport de révision séparé.
 
 Ce que cet exemple remplace
     Le fichier Excel de revue : traçabilité par annotateur, file de
@@ -35,17 +53,20 @@ Ce que cet exemple remplace
 
 Usage
     uv run python examples/10_llm_judge_ab_testing.py
+    uv run python examples/10_llm_judge_ab_testing.py --scope sample \\
+        --sample-size 3
     uv run python examples/10_llm_judge_ab_testing.py --export \\
         --project-id <id>
 """
 
 import json
+import random
 from pathlib import Path
 
 from kili.client import Kili
 from loguru import logger
 
-from kili_examples.cli import build_parser, parse_steps
+from kili_examples.cli import build_parser, parse_review_scope, parse_steps
 from kili_examples.client import get_kili
 from kili_examples.interfaces import (
     build_category,
@@ -56,11 +77,18 @@ from kili_examples.interfaces import (
 from kili_examples.logging import setup_logging
 from kili_examples.paths import DATA_DIR, PROCESSED_DIR
 from kili_examples.rag_review import (
+    NO,
+    PREDICTION_CORRECT_JOB,
+    REFERENCE_CORRECT_JOB,
+    REFERENCE_FIX_JOB,
+    REJECTED_VERDICT,
+    SECONDARY_ANSWER_JOB,
+    YES,
     build_enriched_answer_bank,
     write_answer_bank,
 )
 
-PROJECT_TITLE = "10 - Arbitrage metier du LLM-as-judge (RAG auto)"
+PROJECT_TITLE = "10 - Revision metier du jeu d'evaluation RAG"
 RAG_DIR = DATA_DIR / "samples" / "rag"
 ANSWER_BANK_PATH = RAG_DIR / "answer_bank.jsonl"
 JUDGE_RUN_PATH = RAG_DIR / "judge_run.jsonl"
@@ -68,27 +96,34 @@ JUDGE_RUN_PATH = RAG_DIR / "judge_run.jsonl"
 EXPORT_DIR = PROCESSED_DIR / "10_llm_judge_ab_testing"
 EXPORT_LABELS_PATH = EXPORT_DIR / "labels.json"
 EXPORT_BANK_PATH = EXPORT_DIR / "answer_bank_enrichie.jsonl"
+EXPORT_REPORT_PATH = EXPORT_DIR / "revision_report.json"
 
 # Les `modelName` des deux ASSISTANT. Ils s'affichent dans l'éditeur :
 # autant qu'ils disent explicitement laquelle est la référence.
 REFERENCE_MODEL_NAME = "reference-metier"
 CANDIDATE_MODEL_NAME = "rag-assurance-auto-v2"
 
+# Graine du tirage `--scope sample`. Fixe, pour que deux exécutions
+# soumettent exactement le même échantillon : sans cela, rejouer
+# l'exemple changerait le périmètre à chaque fois.
+SAMPLE_SEED = 20260802
+
 
 # --- 1. Interface d'annotation --------------------------------------------
 
 
 def build_interface() -> dict:
-    """Construire le `json_interface` d'arbitrage.
+    """Construire le `json_interface` de révision.
 
-    Trois jobs, tous au niveau `round` (l'échange question + ses deux
+    Quatre jobs, tous au niveau `round` (l'échange question + ses deux
     réponses), car c'est bien l'échange que le métier arbitre :
 
-    - `VERDICT_METIER` : la décision qui fait autorité. C'est elle qui
-      pilote la boucle.
-    - `MOTIF_ECART` : pourquoi le juge s'est trompé (ou non). Ces motifs
-      sont la matière première pour corriger le prompt du juge.
-    - `COMMENTAIRE_METIER` : texte libre, pour les cas limites.
+    - `REFERENCE_CORRECTE` et `PREDICTION_CORRECTE` : deux jugements
+      **indépendants**. Les séparer est tout l'intérêt du montage — une
+      prédiction peut être fautive parce que la référence l'était.
+    - `REFERENCE_CORRIGEE` et `REPONSE_SECONDAIRE` : deux champs libres
+      optionnels. Séparés eux aussi, pour que l'export sache sans
+      ambiguïté où va chaque texte saisi.
 
     Le `level` est la seule nouveauté par rapport aux interfaces des
     exemples 01 à 09.
@@ -97,58 +132,46 @@ def build_interface() -> dict:
         Le `json_interface` complet.
     """
     jobs = {
-        "VERDICT_METIER": build_llm_classification_job(
+        REFERENCE_CORRECT_JOB: build_llm_classification_job(
             instruction=(
-                "La prédiction est-elle acceptable d'un point de vue métier ?"
+                "La réponse de référence (à gauche) est-elle correcte ?"
             ),
             categories={
-                "ACCEPTABLE": build_category(
-                    "Acceptable — à promouvoir en réponse secondaire",
-                    color="#3CD876",
+                YES: build_category(
+                    "Oui — la référence fait autorité", color="#3CD876"
                 ),
-                "NON_ACCEPTABLE": build_category(
-                    "Non acceptable — le juge avait raison",
-                    color="#FF6B6B",
-                ),
-                "REPONSE_REFERENCE_A_CORRIGER": build_category(
-                    "C'est la réponse de référence qui est fautive",
-                    color="#FFB300",
+                NO: build_category(
+                    "Non — la référence est fautive", color="#FFB300"
                 ),
             },
             level="round",
             input_type="radio",
         ),
-        "MOTIF_ECART": build_llm_classification_job(
-            instruction=(
-                "Pourquoi le juge et le métier divergent-ils ? "
-                "(plusieurs choix possibles)"
-            ),
+        PREDICTION_CORRECT_JOB: build_llm_classification_job(
+            instruction="La nouvelle réponse (à droite) est-elle correcte ?",
             categories={
-                "INFO_OPTIONNELLE_MANQUANTE": build_category(
-                    "Le juge exige une information optionnelle"
-                ),
-                "REFORMULATION": build_category(
-                    "Simple reformulation, sens identique"
-                ),
-                "INFO_ESSENTIELLE_MANQUANTE": build_category(
-                    "Une information essentielle manque vraiment"
-                ),
-                "CONTRESENS": build_category(
-                    "La prédiction contredit la référence"
-                ),
-                "HORS_SUJET": build_category("La prédiction est hors sujet"),
+                YES: build_category("Oui — acceptable", color="#3CD876"),
+                NO: build_category("Non — inacceptable", color="#FF6B6B"),
             },
             level="round",
-            # `checkbox` : plusieurs motifs peuvent se cumuler.
-            input_type="checkbox",
-            required=False,
+            input_type="radio",
         ),
-        "COMMENTAIRE_METIER": build_llm_transcription_job(
+        REFERENCE_FIX_JOB: build_llm_transcription_job(
             instruction=(
-                "Commentaire libre (cas limite, précision à apporter au "
-                "prompt du juge…)"
+                "Si la référence est fautive : saisir ici sa version "
+                "corrigée. Elle remplacera la réponse de référence."
             ),
             level="round",
+            required=False,
+        ),
+        SECONDARY_ANSWER_JOB: build_llm_transcription_job(
+            instruction=(
+                "Facultatif : une autre formulation valide. Utile si la "
+                "nouvelle réponse est presque bonne — corrigez-la ici "
+                "plutôt que de la rejeter."
+            ),
+            level="round",
+            required=False,
         ),
     }
     return build_json_interface(jobs)
@@ -178,17 +201,32 @@ def _load_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
-def load_review_cases() -> list[dict]:
-    """Assembler les cas à faire arbitrer par le métier.
+def load_review_cases(
+    scope: str = "rejected", sample_size: int = 10
+) -> list[dict]:
+    """Assembler les cas à faire relire par le métier.
 
     On joint la banque de réponses et le run du juge sur `question_id`,
-    puis on **ne garde que les cas rejetés par le juge** : les cas qu'il
-    accepte n'ont pas besoin d'un arbitrage humain. C'est ce filtre qui
-    fait tout l'intérêt de la boucle — le métier ne relit que les
-    désaccords potentiels, pas l'intégralité du jeu d'évaluation.
+    puis on sélectionne selon le périmètre demandé :
+
+    - `rejected` : uniquement les cas rejetés par le juge. Le moins
+      coûteux, mais aveugle à ses **faux positifs** — une prédiction
+      qu'il a validée à tort ne sera jamais relue.
+    - `all` : toutes les questions. Audit complet du juge, coût
+      d'annotation proportionnel à la taille du benchmark.
+    - `sample` : tous les rejets, plus `sample_size` cas validés tirés
+      au hasard. Le compromis : on contrôle les faux positifs sans
+      relire l'intégralité du jeu.
+
+    Le tirage de `sample` est déterministe (graine fixe) : deux
+    exécutions soumettent le même échantillon.
+
+    Args:
+        scope: Périmètre de revue (`rejected`, `all` ou `sample`).
+        sample_size: Nombre de cas validés à tirer, en `sample`.
 
     Returns:
-        Les cas à arbitrer, enrichis de la question, de la réponse
+        Les cas à relire, enrichis de la question, de la réponse
         validée, de ses variantes connues et du verdict du juge.
     """
     bank = {
@@ -196,10 +234,8 @@ def load_review_cases() -> list[dict]:
     }
     judge_run = _load_jsonl(JUDGE_RUN_PATH)
 
-    cases = []
+    rejected, accepted = [], []
     for run_item in judge_run:
-        if run_item["judge_verdict"] != "NON_CONFORME":
-            continue
         reference = bank.get(run_item["question_id"])
         if reference is None:
             logger.warning(
@@ -207,18 +243,37 @@ def load_review_cases() -> list[dict]:
                 run_item["question_id"],
             )
             continue
-        cases.append({**reference, **run_item})
+        case = {**reference, **run_item}
+        if run_item["judge_verdict"] == REJECTED_VERDICT:
+            rejected.append(case)
+        else:
+            accepted.append(case)
+
+    if scope == "all":
+        cases = rejected + accepted
+    elif scope == "sample":
+        # `sample` ne peut pas tirer plus d'éléments qu'il n'en existe.
+        drawn = random.Random(SAMPLE_SEED).sample(
+            accepted, min(sample_size, len(accepted))
+        )
+        cases = rejected + drawn
+    else:
+        cases = rejected
 
     logger.info(
-        "{} cas rejetés par le juge sur {} évalués",
+        "Périmètre '{}' : {} cas à relire ({} rejetés et {} validés par "
+        "le juge, sur {} évalués)",
+        scope,
         len(cases),
+        len(rejected),
+        len(cases) - len(rejected),
         len(judge_run),
     )
     return cases
 
 
-def build_conversation(case: dict) -> dict:
-    """Construire la conversation Kili d'un cas à arbitrer.
+def build_conversation(case: dict, scope: str = "rejected") -> dict:
+    """Construire la conversation Kili d'un cas à relire.
 
     Structure d'un asset LLM_STATIC — très différente des autres types :
     l'asset **est** une liste de `chatItems`, chacun portant un `role`
@@ -226,9 +281,8 @@ def build_conversation(case: dict) -> dict:
 
     Le montage retenu ici :
 
-    - `SYSTEM` : le contexte, dont le verdict du juge et sa
-      justification. L'annotateur voit donc *pourquoi* le cas lui est
-      soumis.
+    - `SYSTEM` : la consigne, et le rappel des variantes déjà validées.
+      **Pas le verdict du juge** : l'annotateur juge à l'aveugle.
     - `USER` : la question métier.
     - `ASSISTANT` n°1 : la **réponse validée** (la référence).
     - `ASSISTANT` n°2 : la **prédiction** du RAG.
@@ -239,6 +293,7 @@ def build_conversation(case: dict) -> dict:
 
     Args:
         case: Un cas produit par `load_review_cases`.
+        scope: Périmètre de revue, tracé dans les métadonnées.
 
     Returns:
         Le dictionnaire de conversation attendu par
@@ -247,23 +302,24 @@ def build_conversation(case: dict) -> dict:
     question_id = case["question_id"]
 
     # Les variantes déjà validées lors des runs précédents sont
-    # rappelées au relecteur : sans cela il risque de re-valider une
+    # rappelées au relecteur : sans cela il risque de re-saisir une
     # formulation déjà connue.
     known_variants = case.get("secondary_answers") or []
     variants_block = (
-        "\n\nVariantes déjà acceptées :\n"
+        "\n\nFormulations déjà acceptées pour cette question :\n"
         + "\n".join(f"- {variant}" for variant in known_variants)
         if known_variants
         else ""
     )
 
     system_content = (
-        "Arbitrage métier d'une évaluation RAG (assurance auto).\n\n"
-        f"Verdict du LLM-as-judge : {case['judge_verdict']}\n"
-        f"Justification du juge : {case['judge_reason']}\n\n"
-        "Votre rôle : confirmer ou infirmer ce verdict. Si la "
-        "prédiction est acceptable, elle sera ajoutée comme réponse "
-        "secondaire et le juge en tiendra compte aux prochains runs."
+        "Révision d'un jeu d'évaluation RAG (assurance auto).\n\n"
+        "À gauche, la réponse de référence actuelle ; à droite, la "
+        "réponse produite par la nouvelle version du RAG.\n\n"
+        "Jugez les deux indépendamment. Si la nouvelle réponse est "
+        "presque bonne (une information manque, ou une information "
+        "fausse s'est glissée), saisissez sa version corrigée dans le "
+        "champ prévu : elle deviendra une réponse acceptable de plus."
         f"{variants_block}"
     )
 
@@ -293,20 +349,21 @@ def build_conversation(case: dict) -> dict:
                 "modelName": case.get("model_name", CANDIDATE_MODEL_NAME),
             },
         ],
-        # `metadata` est libre et ressort à l'export : on y range ce
-        # qu'il faudra pour reconstituer la banque sans relire les
-        # fichiers d'entrée.
+        # `metadata` est libre et ressort à l'export. Le verdict du juge
+        # y est rangé — invisible à l'annotateur, mais nécessaire pour
+        # mesurer où le juge s'est trompé.
         "metadata": {
             "question_id": question_id,
             "judge_verdict": case["judge_verdict"],
             "judge_reason": case["judge_reason"],
             "prediction": case["prediction"],
+            "scope": scope,
         },
     }
 
 
-def upload_assets(kili: Kili, project_id: str) -> list[str]:
-    """Importer les conversations à arbitrer.
+def upload_assets(kili: Kili, project_id: str, scope: str, size: int) -> None:
+    """Importer les conversations à relire.
 
     Note : `kili.llm.import_conversations` remplace ici
     `append_many_to_dataset`, qui ne sait pas construire de `chatItems`.
@@ -314,30 +371,35 @@ def upload_assets(kili: Kili, project_id: str) -> list[str]:
     Args:
         kili: Client Kili authentifié.
         project_id: Projet cible.
-
-    Returns:
-        Les `externalId` des conversations importées.
+        scope: Périmètre de revue.
+        size: Taille de l'échantillon, en périmètre `sample`.
     """
-    cases = load_review_cases()
-    conversations = [build_conversation(case) for case in cases]
+    cases = load_review_cases(scope, size)
+    conversations = [build_conversation(case, scope) for case in cases]
 
     result = kili.llm.import_conversations(
         project_id=project_id,
         conversations=conversations,
     )
     logger.info("Import terminé : {}", result)
-    return [case["question_id"] for case in cases]
 
 
 # --- 3. Pré-annotations ---------------------------------------------------
 
 
 def predict(asset: dict) -> dict:
-    """Pré-annotation factice — TODO: brancher votre juge ici.
+    """Pré-annotation : la référence est présumée correcte.
 
-    Ici la « prédiction » n'est pas une sortie de modèle à corriger mais
-    le **verdict du LLM-as-judge**, pré-positionné pour que le métier
-    arbitre au lieu de partir d'un écran vide.
+    Un seul champ est pré-rempli, et c'est délibéré :
+
+    - `REFERENCE_CORRECTE` = OUI, parce que la référence est validée par
+      les experts. La contredire doit rester l'exception, pas la
+      valeur par défaut à saisir à chaque cas.
+    - `PREDICTION_CORRECTE` est **laissé vide**. C'est le jugement que
+      l'on cherche à obtenir ; le pré-remplir avec l'avis du juge
+      biaiserait l'annotateur vers cet avis, alors que tout l'objet du
+      dispositif est de le vérifier.
+    - les deux champs libres restent vides, par nature.
 
     Le format de label d'un projet LLM_STATIC diffère de celui des
     exemples 01 à 09 :
@@ -360,30 +422,24 @@ def predict(asset: dict) -> dict:
        dictionnaires `{"name": ..., "confidence": ...}` comme ailleurs.
 
     Args:
-        asset: Un cas produit par `load_review_cases`.
+        asset: Un cas produit par `load_review_cases`. Non utilisé : la
+            pré-annotation est la même pour tous les cas. Le paramètre
+            est conservé pour rester homogène avec les exemples 01 à 09.
 
     Returns:
         Un label conforme au format LLM_STATIC.
     """
-    # Le juge a rejeté le cas : on pré-positionne le verdict
-    # correspondant, que le métier n'aura qu'à corriger s'il n'est pas
-    # d'accord. C'est précisément ce qui fait gagner du temps par
-    # rapport à l'Excel.
-    verdict = (
-        "NON_ACCEPTABLE"
-        if asset.get("judge_verdict") == "NON_CONFORME"
-        else "ACCEPTABLE"
-    )
-
     return {
         "round": {
-            "VERDICT_METIER": {"0": {"categories": [verdict]}},
+            REFERENCE_CORRECT_JOB: {"0": {"categories": [YES]}},
         }
     }
 
 
-def upload_predictions(kili: Kili, project_id: str) -> None:
-    """Importer les verdicts du juge comme pré-annotations.
+def upload_predictions(
+    kili: Kili, project_id: str, scope: str, size: int
+) -> None:
+    """Importer les pré-annotations.
 
     Deux façons de procéder :
 
@@ -397,11 +453,13 @@ def upload_predictions(kili: Kili, project_id: str) -> None:
     Args:
         kili: Client Kili authentifié.
         project_id: Projet cible.
+        scope: Périmètre de revue.
+        size: Taille de l'échantillon, en périmètre `sample`.
     """
-    cases = load_review_cases()
+    cases = load_review_cases(scope, size)
     conversations = []
     for case in cases:
-        conversation = build_conversation(case)
+        conversation = build_conversation(case, scope)
         # `label` accepte les trois niveaux ; on ne remplit que `round`.
         conversation["label"] = predict(case)
         conversations.append(conversation)
@@ -413,16 +471,21 @@ def upload_predictions(kili: Kili, project_id: str) -> None:
     logger.info("{} pré-annotations importées : {}", len(cases), result)
 
 
-# --- 4. Export : refermer la boucle ---------------------------------------
+# --- 4. Export : la version suivante du dataset ---------------------------
 
 
 def export_review(kili: Kili, project_id: str) -> None:
-    """Exporter les arbitrages et en déduire la banque enrichie.
+    """Exporter les arbitrages et en déduire le dataset révisé.
 
-    C'est l'étape qui referme la boucle : les cas que le métier a jugés
-    `ACCEPTABLE` deviennent des `secondary_answers` de leur question.
-    Le fichier produit est celui que le prochain run du juge doit
-    relire.
+    C'est l'étape qui referme la boucle. Elle produit trois fichiers :
+
+    - `labels.json` : l'export brut, tel que Kili le renvoie ;
+    - `answer_bank_enrichie.jsonl` : **le nouveau dataset**, au schéma
+      strictement identique à celui d'entrée, donc relisible tel quel
+      par le prochain run du juge ;
+    - `revision_report.json` : la traçabilité (références corrigées,
+      variantes ajoutées, désaccords avec le juge), tenue à l'écart du
+      dataset pour ne pas l'alourdir.
 
     Args:
         kili: Client Kili authentifié.
@@ -439,22 +502,59 @@ def export_review(kili: Kili, project_id: str) -> None:
     )
     logger.info("Export brut écrit dans {}", EXPORT_LABELS_PATH)
 
-    enriched, promoted = build_enriched_answer_bank(
+    enriched, report = build_enriched_answer_bank(
         answer_bank=_load_jsonl(ANSWER_BANK_PATH),
         conversations=conversations or [],
     )
     write_answer_bank(EXPORT_BANK_PATH, enriched)
+    EXPORT_REPORT_PATH.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
+    _log_report(report)
     logger.info(
-        "{} prédiction(s) promue(s) en secondary_answer", len(promoted)
-    )
-    for question_id in promoted:
-        logger.info("  → {}", question_id)
-    logger.info(
-        "Banque enrichie écrite dans {} — à réinjecter dans le prochain "
-        "run du juge.",
+        "Nouveau dataset écrit dans {} — à réinjecter dans le prochain "
+        "run du juge. Rapport détaillé dans {}.",
         EXPORT_BANK_PATH,
+        EXPORT_REPORT_PATH,
     )
+
+
+def _log_report(report: dict) -> None:
+    """Résumer le rapport de révision dans les logs."""
+    corrected = report["references_corrigees"]
+    promoted = report["predictions_promues"]
+    rewrites = report["reecritures_manuelles"]
+    disagreement = report["desaccord_juge_metier"]
+
+    logger.info("{} référence(s) corrigée(s)", len(corrected))
+    for item in corrected:
+        logger.info("  → {}", item["question_id"])
+    logger.info(
+        "{} réponse(s) secondaire(s) ajoutée(s) : {} prédiction(s) "
+        "promue(s) telle(s) quelle(s), {} réécriture(s) manuelle(s)",
+        len(promoted) + len(rewrites),
+        len(promoted),
+        len(rewrites),
+    )
+    logger.info(
+        "Désaccord juge / métier : {} sur {} cas arbitrés "
+        "({} faux négatif(s) du juge, {} faux positif(s))",
+        disagreement["desaccords"],
+        disagreement["cas_arbitres"],
+        disagreement["faux_negatifs_juge"],
+        disagreement["faux_positifs_juge"],
+    )
+
+    orphans = report["references_fautives_sans_correction"]
+    if orphans:
+        logger.warning(
+            "{} référence(s) déclarée(s) fautive(s) sans correction "
+            "saisie — à traiter à la main : {}",
+            len(orphans),
+            ", ".join(orphans),
+        )
 
 
 # --- 5. Orchestration -----------------------------------------------------
@@ -463,15 +563,18 @@ def export_review(kili: Kili, project_id: str) -> None:
 def main() -> None:
     """Enchaîner les quatre étapes du cycle de vie."""
     setup_logging()
-    steps = parse_steps(build_parser(__doc__ or PROJECT_TITLE))
+    parser = build_parser(__doc__ or PROJECT_TITLE, with_scope=True)
+    steps = parse_steps(parser)
+    review = parse_review_scope(parser)
     kili = get_kili()
 
     project_id = steps.project_id
     if steps.create:
         project = kili.create_project(
-            title=PROJECT_TITLE,
+            title=f"{PROJECT_TITLE} [{review.scope}]",
             description=(
-                "Arbitrage métier des cas rejetés par le LLM-as-judge."
+                "Révision métier du jeu d'évaluation RAG : la référence "
+                "et la prédiction sont jugées indépendamment."
             ),
             # Type dédié à la comparaison de sorties de modèles.
             input_type="LLM_STATIC",
@@ -484,9 +587,9 @@ def main() -> None:
         raise RuntimeError("Aucun project_id disponible.")
 
     if steps.upload:
-        upload_assets(kili, project_id)
+        upload_assets(kili, project_id, review.scope, review.sample_size)
     if steps.predict:
-        upload_predictions(kili, project_id)
+        upload_predictions(kili, project_id, review.scope, review.sample_size)
     if steps.export:
         export_review(kili, project_id)
 

@@ -106,7 +106,18 @@ vérifier :
   `{"round": {"JOB": {"0": {"categories": [...]}}}}` est repris des
   fixtures d'export. Qu'il soit accepté **en entrée** par
   `import_conversations` est plausible mais non prouvé. Si l'import
-  échoue, repli : importer sans `label`, puis annoter dans l'UI.
+  échoue, repli : importer sans `label`, puis annoter dans l'UI. Le
+  coût serait faible ici — un seul job est pré-rempli
+  (`REFERENCE_CORRECTE = OUI`).
+- **La clé `text` d'un job TRANSCRIPTION au niveau `round`.** Les deux
+  champs libres de l'exemple (`REFERENCE_CORRIGEE`,
+  `REPONSE_SECONDAIRE`) sont relus via `label.round.<JOB>."0".text`, par
+  analogie avec les jobs de classification. La forme exacte que renvoie
+  l'export pour une transcription LLM n'a pas été observée : c'est, avec
+  le point suivant, ce qu'il faut vérifier en premier sur un vrai
+  projet. `extract_text` renvoie `None` si la clé manque, donc une
+  divergence de format se traduirait par des champs libres silencieusement
+  ignorés — pas par une erreur.
 - **La ré-importation d'une conversation existante.** L'exemple appelle
   `import_conversations` une seconde fois (étape `--predict`) avec les
   mêmes `externalId`. Le SDK peut soit mettre à jour, soit créer un
@@ -117,19 +128,24 @@ vérifier :
 - **La clé `level` dans le json_interface.** Les valeurs viennent de
   `kili_formats.types.JobLevel` ; leur rendu dans l'éditeur n'a pas été
   observé.
-- **Le format exact renvoyé par `kili.llm.export`.** `extract_business_verdict`
+- **Le format exact renvoyé par `kili.llm.export`.** `extract_category`
   lit `label.round.<JOB>."0".categories` et tolère les deux formes de
   `categories` (liste de chaînes ou de dictionnaires), mais la structure
   réelle de l'export reste à confirmer. C'est le point à vérifier avant
-  de se fier à la banque enrichie.
-- **`metadata` au retour.** On y range `question_id` et `prediction`
-  pour reconstituer la banque. Si l'export ne les restitue pas,
+  de se fier au dataset révisé.
+- **`metadata` au retour.** On y range `question_id`, `prediction`,
+  `judge_verdict` et `scope`. Si l'export ne les restitue pas,
   `_prediction_of` retombe sur le dernier chat item `ASSISTANT` et
-  `_question_id_of` sur l'`externalId` — deux replis déjà en place.
+  `_question_id_of` sur l'`externalId` — deux replis déjà en place. En
+  revanche `judge_verdict` n'a **pas** de repli : sans lui, le dataset
+  reste correct mais les statistiques de désaccord juge / métier du
+  rapport sont fausses (tout sera compté comme si le juge avait validé).
 - **Le `mlTask` `COMPARISON`.** Mentionné dans la documentation et
   présent dans les fixtures, il n'est pas utilisé par l'exemple 10.
-  Il pourrait remplacer avantageusement `VERDICT_METIER` si l'on veut
-  un choix « laquelle est la meilleure » plutôt qu'un verdict binaire.
+  Il conviendrait à un choix « laquelle est la meilleure », mais pas au
+  besoin traité ici : la référence et la prédiction peuvent être
+  correctes toutes les deux, ou fausses toutes les deux, ce qu'une
+  comparaison par paire ne sait pas exprimer.
 
 ### 10. Jobs non couverts
 
