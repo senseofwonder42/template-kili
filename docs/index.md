@@ -40,6 +40,11 @@ correspondante.
     ---
     Ce que le format paginé change : `polys` et `pageNumberArray`.
 
+-   🤖 **[Évaluation LLM](llm-static.md)**
+    ---
+    `LLM_STATIC` : comparer des sorties de modèles, arbitrer un
+    LLM-as-judge. L'asset est une conversation.
+
 -   📤 **[Export](export.md)**
     ---
     `labels()` ou `export_labels()` — formats natif, COCO, YOLO,

@@ -90,7 +90,48 @@ l'équipe reste à observer.
 volumineux contre l'instance on-premise, dont les limites peuvent
 différer du SaaS.
 
-### 9. Jobs non couverts
+### 9. LLM_STATIC (exemple 10) — la zone la plus incertaine
+
+L'exemple 10 s'appuie sur une partie du SDK plus récente et moins
+documentée que le reste. Les signatures de `kili.llm.import_conversations`
+et `kili.llm.export` sont confirmées dans le source 2.176.1, et les
+formats proviennent des fixtures de test du SDK
+(`tests/unit/llm/services/export/test_llm_static_export.py`). Restent à
+vérifier :
+
+- **La règle « exactement deux ASSISTANT par tour ».** Elle vient de la
+  documentation. Notre montage (référence + prédiction) la respecte,
+  mais le comportement en cas de violation n'est pas connu.
+- **Le pré-remplissage via `label` à l'import.** Le format
+  `{"round": {"JOB": {"0": {"categories": [...]}}}}` est repris des
+  fixtures d'export. Qu'il soit accepté **en entrée** par
+  `import_conversations` est plausible mais non prouvé. Si l'import
+  échoue, repli : importer sans `label`, puis annoter dans l'UI.
+- **La ré-importation d'une conversation existante.** L'exemple appelle
+  `import_conversations` une seconde fois (étape `--predict`) avec les
+  mêmes `externalId`. Le SDK peut soit mettre à jour, soit créer un
+  doublon, soit refuser. **À tester en premier** : si le comportement
+  n'est pas une mise à jour, fusionner les étapes `--upload` et
+  `--predict` en passant `label` dès le premier import (le code est déjà
+  structuré pour, voir `upload_predictions`).
+- **La clé `level` dans le json_interface.** Les valeurs viennent de
+  `kili_formats.types.JobLevel` ; leur rendu dans l'éditeur n'a pas été
+  observé.
+- **Le format exact renvoyé par `kili.llm.export`.** `extract_business_verdict`
+  lit `label.round.<JOB>."0".categories` et tolère les deux formes de
+  `categories` (liste de chaînes ou de dictionnaires), mais la structure
+  réelle de l'export reste à confirmer. C'est le point à vérifier avant
+  de se fier à la banque enrichie.
+- **`metadata` au retour.** On y range `question_id` et `prediction`
+  pour reconstituer la banque. Si l'export ne les restitue pas,
+  `_prediction_of` retombe sur le dernier chat item `ASSISTANT` et
+  `_question_id_of` sur l'`externalId` — deux replis déjà en place.
+- **Le `mlTask` `COMPARISON`.** Mentionné dans la documentation et
+  présent dans les fixtures, il n'est pas utilisé par l'exemple 10.
+  Il pourrait remplacer avantageusement `VERDICT_METIER` si l'on veut
+  un choix « laquelle est la meilleure » plutôt qu'un verdict binaire.
+
+### 10. Jobs non couverts
 
 Ces `mlTask` existent mais n'ont pas d'exemple ici :
 `PAGE_LEVEL_CLASSIFICATION`, `PAGE_LEVEL_TRANSCRIPTION`,

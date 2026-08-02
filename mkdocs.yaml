@@ -73,6 +73,7 @@ nav:
       - Entités nommées: ner.md
       - Transcription et OCR: transcription.md
       - Spécificités PDF: pdf-ocr.md
+      - Évaluation LLM (LLM_STATIC): llm-static.md
       - Export: export.md
   - Incertitudes: incertitudes.md
   - Reference: reference/

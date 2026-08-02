@@ -197,6 +197,70 @@ def build_ner_job(
     }
 
 
+# Niveaux d'annotation propres aux projets LLM_STATIC.
+# Vérifiés dans `kili_formats.types.JobLevel` (SDK 2.176.1).
+# - "completion"   : on annote chaque réponse d'assistant séparément
+# - "round"        : on annote l'échange (question + ses réponses)
+# - "conversation" : on annote la conversation entière
+LlmJobLevel = Literal["completion", "round", "conversation"]
+
+
+def build_llm_classification_job(
+    *,
+    instruction: str,
+    categories: dict[str, Category],
+    level: LlmJobLevel,
+    input_type: ClassificationInput = "radio",
+    required: bool = True,
+) -> Job:
+    """Construire un job de classification pour un projet LLM_STATIC.
+
+    Identique à `build_classification_job`, à une clé près : `level`,
+    qui indique à quel niveau de la conversation le job s'applique.
+    Cette clé n'existe que dans les projets LLM.
+
+    Args:
+        instruction: Consigne affichée à l'annotateur.
+        categories: Catégories proposées, indexées par leur clé métier.
+        level: Niveau d'annotation (`completion`, `round` ou
+            `conversation`).
+        input_type: Widget de saisie.
+        required: True si l'annotateur doit obligatoirement répondre.
+
+    Returns:
+        Le dictionnaire du job.
+    """
+    job = build_classification_job(
+        instruction=instruction,
+        categories=categories,
+        input_type=input_type,
+        required=required,
+    )
+    job["level"] = level
+    return job
+
+
+def build_llm_transcription_job(
+    *,
+    instruction: str,
+    level: LlmJobLevel,
+    required: bool = False,
+) -> Job:
+    """Construire un job de transcription pour un projet LLM_STATIC.
+
+    Args:
+        instruction: Consigne affichée à l'annotateur.
+        level: Niveau d'annotation.
+        required: True si la saisie est obligatoire.
+
+    Returns:
+        Le dictionnaire du job.
+    """
+    job = build_transcription_job(instruction=instruction, required=required)
+    job["level"] = level
+    return job
+
+
 def build_json_interface(jobs: dict[str, Job]) -> dict[str, Any]:
     """Assembler les jobs en un `json_interface` complet.
 

@@ -45,6 +45,10 @@ EXAMPLE_CASES = [
         "PDF",
         {"external_id": "constat_amiable_001"},
     ),
+    # L'exemple 10 est volontairement absent : un projet LLM_STATIC
+    # n'utilise pas le format `jsonResponse` validé ici (le label est
+    # indexé par niveau, et `categories` est une liste de chaînes).
+    # Il est couvert par tests/test_rag_review.py.
 ]
 
 
@@ -139,6 +143,20 @@ def test_multitask_prediction_addresses_several_jobs():
     assert "categories" in response["TYPE_DOCUMENT"]
     assert "annotations" in response["ENTITES_DOCUMENT"]
     assert "annotations" in response["ZONES_CLES"]
+
+
+def test_every_example_is_covered_by_a_test():
+    """Aucun exemple ne doit échapper à la validation.
+
+    Les exemples classiques sont couverts ici ; l'exemple 10
+    (LLM_STATIC) l'est par `test_rag_review.py`. Ajouter un exemple sans
+    test doit faire échouer cette assertion.
+    """
+    on_disk = {path.stem for path in EXAMPLES_DIR.glob("[0-9]*.py")}
+    covered = {name for name, _, _ in EXAMPLE_CASES}
+    covered.add("10_llm_judge_ab_testing")  # cf. test_rag_review.py
+
+    assert on_disk == covered
 
 
 def test_vlm_omits_fields_the_model_could_not_read():

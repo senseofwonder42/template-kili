@@ -29,6 +29,7 @@ SAMPLES_DIR = DATA_DIR / "samples"
 TEXT_DIR = SAMPLES_DIR / "text"
 PDF_DIR = SAMPLES_DIR / "pdf"
 IMAGE_DIR = SAMPLES_DIR / "image"
+RAG_DIR = SAMPLES_DIR / "rag"
 
 # --- Vocabulaire métier fictif -------------------------------------------
 
@@ -58,6 +59,174 @@ EMAIL_TEMPLATES = [
     "Bonjour {conseiller},\n\nJe vous confirme que le garage de {ville} a "
     "réceptionné mon véhicule le {date}. Le devis s'élève à {montant} "
     "euros. Contrat {contrat}.\n\nBien à vous,\n{nom}",
+]
+
+# --- Jeu d'évaluation RAG (exemple 10) -----------------------------------
+#
+# Écrit à la main plutôt que tiré au sort : l'intérêt pédagogique tient
+# précisément à la *nature* du désaccord entre le juge LLM et le métier.
+#
+# `judge_verdict` simule la sortie du LLM-as-judge du run précédent.
+# Les cas intéressants sont ceux marqués NON_CONFORME : certains sont de
+# vraies erreurs, d'autres de la sévérité excessive (le juge reproche
+# l'absence d'un élément qui n'est en fait qu'optionnel).
+RAG_EVALUATION_CASES = [
+    {
+        "question_id": "q-0001",
+        "question": (
+            "Quel est le délai pour déclarer un sinistre automobile ?"
+        ),
+        "answer": (
+            "Vous disposez de 5 jours ouvrés à compter de la date du "
+            "sinistre pour le déclarer à votre assureur. Ce délai est "
+            "ramené à 2 jours ouvrés en cas de vol du véhicule."
+        ),
+        "prediction": (
+            "Le délai de déclaration est de 5 jours ouvrés après le sinistre."
+        ),
+        # Le juge sanctionne l'absence du cas « vol », que le métier
+        # considère comme une précision optionnelle ici.
+        "judge_verdict": "NON_CONFORME",
+        "judge_reason": (
+            "La prédiction omet le délai spécifique de 2 jours en cas de "
+            "vol mentionné dans la réponse de référence."
+        ),
+    },
+    {
+        "question_id": "q-0002",
+        "question": "Comment fonctionne le bonus-malus ?",
+        "answer": (
+            "Le coefficient de réduction-majoration démarre à 1,00. Il "
+            "diminue de 5 % par année sans sinistre responsable, jusqu'à "
+            "un plancher de 0,50. Il augmente de 25 % par sinistre "
+            "responsable."
+        ),
+        "prediction": (
+            "Le bonus-malus part de 1,00. Chaque année sans sinistre "
+            "responsable le fait baisser de 5 %, avec un minimum de "
+            "0,50. À l'inverse, un sinistre responsable le majore de "
+            "25 %."
+        ),
+        # Reformulation fidèle : le juge l'accepte.
+        "judge_verdict": "CONFORME",
+        "judge_reason": "Tous les éléments chiffrés sont présents.",
+    },
+    {
+        "question_id": "q-0003",
+        "question": "La franchise s'applique-t-elle en cas de bris de glace ?",
+        "answer": (
+            "Oui, une franchise spécifique bris de glace de 90 euros "
+            "s'applique. Elle est supprimée si la réparation est "
+            "effectuée dans le réseau de garages partenaires."
+        ),
+        "prediction": (
+            "Non, le bris de glace n'est jamais soumis à franchise."
+        ),
+        # Vraie erreur : le juge a raison de rejeter.
+        "judge_verdict": "NON_CONFORME",
+        "judge_reason": (
+            "La prédiction contredit la réponse de référence sur "
+            "l'existence même de la franchise."
+        ),
+    },
+    {
+        "question_id": "q-0004",
+        "question": (
+            "Que couvre la garantie responsabilité civile automobile ?"
+        ),
+        "answer": (
+            "La responsabilité civile couvre les dommages corporels et "
+            "matériels causés aux tiers. Elle est obligatoire. Elle ne "
+            "couvre ni les dommages au véhicule de l'assuré ni ses "
+            "propres blessures."
+        ),
+        "prediction": (
+            "Elle prend en charge les dommages corporels et matériels "
+            "que vous causez à autrui. C'est la garantie minimale "
+            "légalement obligatoire."
+        ),
+        # Le juge reproche l'absence des exclusions, que le métier juge
+        # non essentielles pour répondre à la question posée.
+        "judge_verdict": "NON_CONFORME",
+        "judge_reason": (
+            "La prédiction ne mentionne pas les exclusions présentes "
+            "dans la réponse de référence."
+        ),
+    },
+    {
+        "question_id": "q-0005",
+        "question": "Puis-je prêter mon véhicule à un tiers ?",
+        "answer": (
+            "Le prêt de volant est autorisé sauf clause contraire au "
+            "contrat. En cas de sinistre responsable, une franchise "
+            "majorée de 150 euros peut s'appliquer si le conducteur a "
+            "moins de 3 ans de permis."
+        ),
+        "prediction": (
+            "Oui, le prêt de volant est possible sauf mention contraire "
+            "dans votre contrat. Attention : si le conducteur a moins de "
+            "3 ans de permis, une franchise majorée de 150 euros "
+            "s'applique en cas de sinistre responsable."
+        ),
+        "judge_verdict": "CONFORME",
+        "judge_reason": "Reformulation complète et fidèle.",
+    },
+    {
+        "question_id": "q-0006",
+        "question": "Comment résilier mon contrat auto ?",
+        "answer": (
+            "Depuis la loi Hamon, vous pouvez résilier à tout moment "
+            "après la première année d'engagement, sans frais ni "
+            "justificatif. La résiliation prend effet un mois après "
+            "réception de la demande par l'assureur."
+        ),
+        "prediction": (
+            "Après un an de contrat, la loi Hamon vous permet de "
+            "résilier quand vous le souhaitez, sans frais. L'effet est "
+            "au bout d'un mois."
+        ),
+        # Le juge sanctionne « sans justificatif », omis par la
+        # prédiction — sévérité discutable.
+        "judge_verdict": "NON_CONFORME",
+        "judge_reason": (
+            "L'absence de justificatif n'est pas explicitement mentionnée."
+        ),
+    },
+    {
+        "question_id": "q-0007",
+        "question": "Le vol d'autoradio est-il couvert ?",
+        "answer": (
+            "Le vol d'autoradio d'origine est couvert par la garantie "
+            "vol, sous réserve d'effraction constatée. Les autoradios "
+            "installés après l'achat doivent avoir été déclarés."
+        ),
+        "prediction": (
+            "Oui, tout autoradio est couvert sans condition par la "
+            "garantie vol."
+        ),
+        # Vraie erreur : suppression des conditions.
+        "judge_verdict": "NON_CONFORME",
+        "judge_reason": (
+            "La prédiction supprime les conditions d'effraction et de "
+            "déclaration."
+        ),
+    },
+    {
+        "question_id": "q-0008",
+        "question": "Quelle est la durée de validité du constat amiable ?",
+        "answer": (
+            "Le constat amiable doit être transmis à l'assureur dans un "
+            "délai de 5 jours ouvrés. Une fois signé par les deux "
+            "parties, il ne peut plus être modifié."
+        ),
+        "prediction": (
+            "Il faut l'envoyer à l'assureur sous 5 jours ouvrés. Après "
+            "signature des deux conducteurs, aucune modification n'est "
+            "possible."
+        ),
+        "judge_verdict": "CONFORME",
+        "judge_reason": "Équivalent sémantique.",
+    },
 ]
 
 VILLES = ["Lyon", "Nantes", "Lille", "Bordeaux", "Strasbourg", "Toulouse"]
@@ -270,6 +439,44 @@ def _generate_images(rng: random.Random) -> None:
         logger.info("Image écrite : {}", path)
 
 
+def _generate_rag_files() -> None:
+    """Écrire la banque de réponses et le run du LLM-as-judge.
+
+    Deux fichiers, qui reflètent la séparation des responsabilités du
+    cas d'usage :
+
+    - `answer_bank.jsonl` : la vérité terrain validée par les métiers.
+      C'est le fichier que la boucle enrichit avec des
+      `secondary_answers`. Il démarre sans aucune variante.
+    - `judge_run.jsonl` : la sortie d'un run d'évaluation — pour chaque
+      question, la prédiction du RAG et le verdict du juge.
+    """
+    answer_bank = [
+        {
+            "question_id": case["question_id"],
+            "question": case["question"],
+            "answer": case["answer"],
+            # Aucune variante au départ : c'est la boucle métier qui
+            # remplira cette liste, run après run.
+            "secondary_answers": [],
+        }
+        for case in RAG_EVALUATION_CASES
+    ]
+    _write_jsonl(RAG_DIR / "answer_bank.jsonl", answer_bank)
+
+    judge_run = [
+        {
+            "question_id": case["question_id"],
+            "prediction": case["prediction"],
+            "judge_verdict": case["judge_verdict"],
+            "judge_reason": case["judge_reason"],
+            "model_name": "rag-assurance-auto-v2",
+        }
+        for case in RAG_EVALUATION_CASES
+    ]
+    _write_jsonl(RAG_DIR / "judge_run.jsonl", judge_run)
+
+
 def generate_sample_data() -> None:
     """Générer l'ensemble des fichiers d'exemple dans `data/samples/`.
 
@@ -282,6 +489,7 @@ def generate_sample_data() -> None:
     _write_jsonl(TEXT_DIR / "emails.jsonl", _generate_emails(rng, 8))
     _generate_pdfs(rng)
     _generate_images(rng)
+    _generate_rag_files()
 
     logger.info("Données d'exemple générées dans {}", SAMPLES_DIR)
 
