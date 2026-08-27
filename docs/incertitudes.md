@@ -27,6 +27,12 @@ Aucune des méthodes suivantes n'a été exécutée :
 - `kili.create_predictions(...)`
 - `kili.labels(...)`
 - `kili.export_labels(...)`
+- `kili.update_properties_in_assets(...)`
+- `kili.assign_assets_to_labelers(...)`
+- `kili.project_users(...)`
+- `kili.create_questions(...)`, `kili.create_issues(...)`,
+  `kili.issues(...)`, `kili.count_issues(...)`,
+  `kili.update_issue_status(...)`
 
 Leurs **signatures** sont confirmées (lues dans le source 2.176.1), mais
 pas leur comportement réel, ni les erreurs qu'elles peuvent renvoyer.
@@ -147,7 +153,44 @@ vérifier :
   correctes toutes les deux, ou fausses toutes les deux, ce qu'une
   comparaison par paire ne sait pas exprimer.
 
-### 10. Jobs non couverts
+### 10. Pilotage du projet (exemples 11 et 12)
+
+Ces deux exemples n'annotent rien : ils n'ont donc **aucune** validation
+hors ligne équivalente à `ParsedJobs`. Seules leurs fonctions pures sont
+testées (`tests/test_workflow.py`). Points à vérifier :
+
+- **Identifiants d'annotateur : `user.id` ou email ?** Les docstrings du
+  SDK 2.176.1 se contredisent en apparence :
+  `assign_assets_to_labelers` annonce des *userIds*,
+  `update_properties_in_assets(to_be_labeled_by_array=...)` des
+  *emails*. L'exemple 11 emprunte les deux chemins (le second via
+  `--labeler-email`) et journalise les valeurs lues par
+  `project_users` : c'est le premier run qui tranchera.
+- **`json_metadatas` remplace-t-il ou fusionne-t-il ?** L'exemple 11
+  suppose un **remplacement** et relit donc la métadonnée existante
+  avant de réécrire (`merge_metadata`). Le motif reste correct si la
+  plateforme fusionne ; il faut simplement confirmer laquelle des deux
+  sémantiques s'applique, en comparant l'avant/après de l'étape
+  `--enrich`.
+- **Le champ `toBeLabeledBy` d'un asset.** Il est typé `ProjectUser`
+  (singulier) dans `kili/types.py` alors que l'écriture attend une
+  **liste** d'annotateurs. L'exemple 11 le demande sous la forme
+  `toBeLabeledBy.user.email` à l'étape `--inspect` ; si la requête
+  échoue, c'est ce champ qu'il faut corriger.
+- **Le réglage « Auto assign » de l'organisation.** Son interaction avec
+  une assignation programmatique n'est pas documentée.
+- **Une issue sur un label de type `PREDICTION`.** L'exemple 12 prend
+  les premiers labels du projet sans filtrer sur `labelType`. Si la
+  plateforme refuse les signalements sur des pré-annotations, il faudra
+  ajouter `label_type_in=["DEFAULT", "REVIEW"]` à l'appel
+  `kili.labels(...)`.
+- **Le typage et la visibilité des métadonnées.** La documentation
+  mentionne `update_properties_in_project` pour déclarer une clé comme
+  chaîne, nombre ou date et la rendre filtrable dans l'interface. Ce
+  n'est pas couvert ici : les métadonnées de l'exemple 11 pourraient
+  n'être filtrables que par l'API tant que ce réglage n'est pas fait.
+
+### 11. Jobs non couverts
 
 Ces `mlTask` existent mais n'ont pas d'exemple ici :
 `PAGE_LEVEL_CLASSIFICATION`, `PAGE_LEVEL_TRANSCRIPTION`,

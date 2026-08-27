@@ -3,8 +3,9 @@
 Dépôt de référence interne pour piloter **Kili Technology** depuis son
 SDK Python, appliqué à des cas d'usage assurance.
 
-Neuf squelettes exécutables, un par type d'annotation. Chacun déroule le
-même cycle de vie en quatre étapes :
+Dix squelettes exécutables, un par type d'annotation, plus deux exemples
+de **pilotage de projet**. Les dix premiers déroulent le même cycle de
+vie en quatre étapes :
 
 1. créer le projet et son interface d'annotation (`json_interface`) ;
 2. importer les assets ;
@@ -69,7 +70,22 @@ Ce qui reste à confirmer est listé dans la page
 9. Seulement ensuite, dérouler les exemples 02 à 09 — en commençant par
    le 04 (géométrie image) et le 06 (géométrie PDF), les deux plus
    susceptibles de demander un ajustement.
-10. **Supprimer les projets jetables** créés pendant cette recette.
+10. **Les exemples de pilotage** (11 et 12), qui écrivent sur des assets
+    et des labels existants :
+    ```bash
+    # la file : métadonnées, priorité, assignation
+    uv run python examples/11_queue_management.py --create --upload
+    uv run python examples/11_queue_management.py --enrich --prioritize \
+      --assign --inspect --project-id <project_id>
+
+    # la boucle qualité, sur un projet déjà annoté (ex. celui du 04)
+    uv run python examples/12_issues_and_questions.py --project-id <id>
+    ```
+    À contrôler dans l'UI : la clé `text` s'affiche bien en tête du
+    panneau de métadonnées, `--enrich` complète sans écraser, l'ordre de
+    la file change, et la question comme l'issue apparaissent dans
+    « Issues & Questions ».
+11. **Supprimer les projets jetables** créés pendant cette recette.
 
 ---
 
@@ -145,14 +161,36 @@ l'autre. Sa sortie est la **version suivante du jeu d'évaluation**,
 réinjectée dans le run suivant du juge — voir
 [Évaluation LLM](llm-static.md).
 
+## Piloter le projet
+
+Deux exemples ne produisent aucune annotation : ils pilotent le projet
+**autour** de l'annotation.
+
+| Besoin métier | Méthodes SDK | Exemple |
+| --- | --- | --- |
+| Enrichir, prioriser et répartir la file de traitement | `update_properties_in_assets` (`json_metadatas`, `priorities`, `to_be_labeled_by_array`), `assign_assets_to_labelers`, `project_users` | [`11_queue_management.py`](./examples/11_queue_management.py) |
+| Suivre la boucle qualité entre annotateurs et relecteurs | `create_questions`, `create_issues`, `issues`, `count_issues`, `update_issue_status` | [`12_issues_and_questions.py`](./examples/12_issues_and_questions.py) |
+
+Ces deux-là n'ont pas le cycle `--create/--upload/--predict/--export` :
+leurs étapes portent d'autres noms (`--enrich`, `--prioritize`,
+`--assign`, `--inspect` ; `--ask`, `--flag`, `--list`, `--resolve`).
+
+L'exemple **11** est autonome (il crée son propre projet). L'exemple
+**12** exige un `--project-id` **déjà annoté** : une boucle qualité n'a
+pas de sens sans label à contester — le projet de l'exemple 04 convient
+bien, ses labels contiennent des objets avec des `mid`.
+
+Voir [File d'annotation](workflow.md) et
+[Questions et issues](issues.md).
+
 ## Organisation du dépôt
 
 ```
-examples/          les neuf squelettes — la source de vérité
+examples/          les douze squelettes — la source de vérité
 src/kili_examples/ le peu de code partagé (client, interfaces, import, export)
 scripts/           génération des données synthétiques
 notebooks/         trois visites guidées
-docs/              une page par type d'annotation + les incertitudes
+docs/              une page par type d'annotation, le pilotage, les incertitudes
 tests/             tests des helpers purs, client Kili mocké
 ```
 
@@ -186,6 +224,8 @@ uv run --group docs mkdocs serve
 - [Spécificités PDF](pdf-ocr.md)
 - [Évaluation LLM (LLM_STATIC)](llm-static.md)
 - [Export](export.md)
+- [File d'annotation](workflow.md)
+- [Questions et issues](issues.md)
 - [**Incertitudes**](incertitudes.md)
 
 ## Conventions

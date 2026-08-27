@@ -54,6 +54,27 @@ correspondante.
 
 ---
 
+## Pilotage du projet
+
+Ce qui se joue autour de l'annotation : préparer la file, puis suivre la
+boucle qualité.
+
+<div class="grid cards" markdown>
+
+-   🎛️ **[File d'annotation](workflow.md)**
+    ---
+    Métadonnées d'asset (dont les clés réservées), priorité de file et
+    assignation à un annotateur.
+
+-   💬 **[Questions et issues](issues.md)**
+    ---
+    Une question vise un asset, une issue vise un label — voire un
+    objet précis. Les deux se lisent ensemble.
+
+</div>
+
+---
+
 ## Autres sections
 
 <div class="grid cards" markdown>

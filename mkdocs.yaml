@@ -75,6 +75,9 @@ nav:
       - Spécificités PDF: pdf-ocr.md
       - Évaluation LLM (LLM_STATIC): llm-static.md
       - Export: export.md
+  - Pilotage du projet:
+      - File d'annotation: workflow.md
+      - Questions et issues: issues.md
   - Incertitudes: incertitudes.md
   - Reference: reference/
   - Notebooks: notebooks/

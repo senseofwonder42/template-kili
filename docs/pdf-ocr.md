@@ -22,6 +22,8 @@ kili.append_many_to_dataset(
 
 `json_metadata_array` est libre : les métadonnées sont consultables dans
 l'interface et ressortent à l'export, ce qui aide à filtrer les assets.
+Voir [Piloter la file d'annotation](workflow.md) pour les clés réservées,
+la mise à jour après import et le filtrage `metadata_where`.
 
 ## Classification : rien ne change
 

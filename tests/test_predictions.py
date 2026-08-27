@@ -149,12 +149,18 @@ def test_every_example_is_covered_by_a_test():
     """Aucun exemple ne doit échapper à la validation.
 
     Les exemples classiques sont couverts ici ; l'exemple 10
-    (LLM_STATIC) l'est par `test_rag_review.py`. Ajouter un exemple sans
-    test doit faire échouer cette assertion.
+    (LLM_STATIC) l'est par `test_rag_review.py`, et les exemples 11 et 12
+    par `test_workflow.py`. Ajouter un exemple sans test doit faire
+    échouer cette assertion.
     """
     on_disk = {path.stem for path in EXAMPLES_DIR.glob("[0-9]*.py")}
     covered = {name for name, _, _ in EXAMPLE_CASES}
     covered.add("10_llm_judge_ab_testing")  # cf. test_rag_review.py
+    # Les exemples 11 et 12 pilotent le projet et ne produisent aucun
+    # `json_response` : il n'y a pas de prédiction à confronter à une
+    # ontologie. Leur logique pure est testée dans test_workflow.py.
+    covered.add("11_queue_management")
+    covered.add("12_issues_and_questions")
 
     assert on_disk == covered
 
